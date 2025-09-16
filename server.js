@@ -503,18 +503,52 @@ app.get('/api/posts', authenticateToken, async (req, res) => {
 });
 
 // Create new post
-app.post('/api/posts', authenticateToken, async (req, res) => {
+app.post('/api/posts', authenticateToken, upload.single('image'), async (req, res) => {
   try {
-    const { content, image_url } = req.body;
+    let content, image_url = null;
+
+    // Handle both JSON and FormData requests
+    if (req.body.content) {
+      content = req.body.content;
+      image_url = req.body.image_url || null;
+    } else {
+      return res.status(400).json({ message: 'Post content is required' });
+    }
 
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ message: 'Post content is required' });
     }
 
+    // If there's an uploaded image file, upload it to Cloudinary
+    if (req.file) {
+      try {
+        const uploadResult = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            {
+              resource_type: 'image',
+              folder: process.env.CLOUDINARY_FOLDER || 'PSN',
+              transformation: [
+                { width: 800, height: 600, crop: 'limit' },
+                { quality: 'auto' }
+              ]
+            },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result);
+            }
+          ).end(req.file.buffer);
+        });
+        image_url = uploadResult.secure_url;
+      } catch (uploadError) {
+        console.error('Error uploading image:', uploadError);
+        return res.status(500).json({ message: 'Error uploading image' });
+      }
+    }
+
     const post = new Post({
       user_id: req.user.userId,
       content: content.trim(),
-      image_url: image_url || null,
+      image_url: image_url,
       likes: [],
       comments: []
     });
