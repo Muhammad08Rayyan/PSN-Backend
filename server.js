@@ -115,6 +115,33 @@ const newsSchema = new mongoose.Schema({
 
 const News = mongoose.model('News', newsSchema, 'news');
 
+// Events Schema (admin-managed, read-only for mobile)
+const eventSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  date: { type: Date, required: true },
+  location: { type: String, required: true },
+  image_url: { type: String },
+  isActive: { type: Boolean, default: true },
+  createdBy: { type: String, default: 'Admin' }
+}, { timestamps: true });
+
+const Event = mongoose.model('Event', eventSchema, 'events');
+
+// Case Discussion Schema (admin-managed, read-only for mobile)
+const caseDiscussionSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  uploaded_by: { type: String, required: true },
+  resource_url: { type: String }, // Optional image or PDF attachment
+  resource_type: { type: String, enum: ['image', 'pdf'], default: null },
+  category: { type: String, default: 'General' },
+  isActive: { type: Boolean, default: true },
+  createdBy: { type: String, default: 'Admin' }
+}, { timestamps: true });
+
+const CaseDiscussion = mongoose.model('CaseDiscussion', caseDiscussionSchema, 'casediscussions');
+
 // Chat Schemas
 const conversationSchema = new mongoose.Schema({
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Doctor', required: true }],
@@ -1291,6 +1318,183 @@ app.get('/api/users/online', authenticateToken, (req, res) => {
   res.json({ onlineUsers });
 });
 
+// Get events (read-only for mobile users)
+app.get('/api/events', authenticateToken, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const events = await Event.find({ isActive: true })
+      .sort({ date: 1 }) // Sort by date ascending (upcoming first)
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Event.countDocuments({ isActive: true });
+
+    const formattedEvents = events.map(event => ({
+      id: event._id,
+      title: event.title,
+      description: event.description,
+      date: event.date,
+      location: event.location,
+      image_url: event.image_url,
+      timestamp: formatEventDate(event.date),
+      createdBy: event.createdBy
+    }));
+
+    res.json({
+      events: formattedEvents,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+      hasMore: page * limit < total
+    });
+  } catch (error) {
+    console.error('Error fetching events:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get single event by ID
+app.get('/api/events/:eventId', authenticateToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    const event = await Event.findById(eventId);
+
+    if (!event || !event.isActive) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+
+    const formattedEvent = {
+      id: event._id,
+      title: event.title,
+      description: event.description,
+      date: event.date,
+      location: event.location,
+      image_url: event.image_url,
+      timestamp: formatEventDate(event.date),
+      createdBy: event.createdBy
+    };
+
+    res.json(formattedEvent);
+  } catch (error) {
+    console.error('Error fetching event:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Helper function to format event date
+function formatEventDate(date) {
+  const eventDate = new Date(date);
+  const now = new Date();
+
+  // If event is today
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const eventDateOnly = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
+
+  if (eventDateOnly.getTime() === today.getTime()) {
+    return 'Today';
+  }
+
+  // If event is tomorrow
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  if (eventDateOnly.getTime() === tomorrow.getTime()) {
+    return 'Tomorrow';
+  }
+
+  // If event is within this week
+  const diffTime = eventDateOnly.getTime() - today.getTime();
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+  if (diffDays >= 0 && diffDays <= 7) {
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    return dayNames[eventDate.getDay()];
+  }
+
+  // Otherwise show full date
+  return eventDate.toLocaleDateString();
+}
+
+// Get case discussions (read-only for mobile users)
+app.get('/api/case-discussions', authenticateToken, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const discussions = await CaseDiscussion.find({ isActive: true })
+      .sort({ createdAt: -1 }) // Sort by newest first
+      .skip(skip)
+      .limit(limit);
+
+    const total = await CaseDiscussion.countDocuments({ isActive: true });
+
+    const formattedDiscussions = discussions.map(discussion => ({
+      id: discussion._id,
+      title: discussion.title,
+      description: discussion.description,
+      uploaded_by: discussion.uploaded_by,
+      resource_url: discussion.resource_url,
+      resource_type: discussion.resource_type,
+      category: discussion.category,
+      timestamp: formatTimeAgo(discussion.createdAt),
+      createdBy: discussion.createdBy,
+      createdAt: discussion.createdAt
+    }));
+
+    res.json({
+      discussions: formattedDiscussions,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+      hasMore: page * limit < total
+    });
+  } catch (error) {
+    console.error('Error fetching case discussions:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get single case discussion by ID
+app.get('/api/case-discussions/:discussionId', authenticateToken, async (req, res) => {
+  try {
+    const { discussionId } = req.params;
+
+    const discussion = await CaseDiscussion.findById(discussionId);
+
+    if (!discussion || !discussion.isActive) {
+      return res.status(404).json({ message: 'Case discussion not found' });
+    }
+
+    const formattedDiscussion = {
+      id: discussion._id,
+      title: discussion.title,
+      description: discussion.description,
+      uploaded_by: discussion.uploaded_by,
+      resource_url: discussion.resource_url,
+      resource_type: discussion.resource_type,
+      category: discussion.category,
+      timestamp: formatTimeAgo(discussion.createdAt),
+      createdBy: discussion.createdBy,
+      createdAt: discussion.createdAt
+    };
+
+    res.json(formattedDiscussion);
+  } catch (error) {
+    console.error('Error fetching case discussion:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Case discussion not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Test route
 app.get('/api/test', (req, res) => {
   res.json({ message: 'Test route working!' });
@@ -1320,6 +1524,10 @@ server.listen(PORT, () => {
   console.log('POST /api/conversations/:conversationId/messages');
   console.log('GET /api/news');
   console.log('GET /api/news/:newsId');
+  console.log('GET /api/events');
+  console.log('GET /api/events/:eventId');
+  console.log('GET /api/case-discussions');
+  console.log('GET /api/case-discussions/:discussionId');
   console.log('GET /api/test');
 });
 
