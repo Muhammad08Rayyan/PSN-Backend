@@ -169,18 +169,69 @@ const jobSchema = new mongoose.Schema({
   experience: { type: String, required: true },
   specialty: { type: String, required: true },
   hospital: { type: String },
-  urgent: { type: Boolean, default: false },
-  isEasyApply: { type: Boolean, default: false },
   applicants: { type: Number, default: 0 },
   companyLogo: { type: String },
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Doctor' },
   isActive: { type: Boolean, default: true },
+  adminVerified: { type: Boolean, default: false },
   expiryDate: { type: Date },
   contactEmail: { type: String },
   contactPhone: { type: String }
 }, { timestamps: true });
 
 const Job = mongoose.model('Job', jobSchema, 'jobs');
+
+// Course Schema for course offerings
+const courseSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  thumbnail: { type: String }, // URL to course thumbnail image
+  instructor: { type: String, required: true },
+  duration: { type: String }, // e.g., "4 weeks", "2 hours"
+  level: {
+    type: String,
+    enum: ['Beginner', 'Intermediate', 'Advanced'],
+    default: 'Beginner'
+  },
+  category: { type: String, required: true }, // e.g., "Neurology", "Clinical Skills"
+  sections: [{
+    title: { type: String, required: true },
+    description: { type: String },
+    videos: [{
+      _id: { type: mongoose.Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
+      title: { type: String, required: true },
+      youtubeUrl: { type: String, required: true }, // YouTube video URL
+      duration: { type: String }, // e.g., "15:30"
+      description: { type: String }
+    }]
+  }],
+  enrolledUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Doctor' }],
+  maxEnrollments: { type: Number, default: null }, // null means unlimited
+  price: { type: Number, default: 0 }, // 0 means free
+  postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Doctor', required: true },
+  isActive: { type: Boolean, default: true },
+  adminVerified: { type: Boolean, default: false },
+  tags: [{ type: String }], // e.g., ["neurosurgery", "pediatric", "diagnosis"]
+  prerequisites: [{ type: String }], // Course prerequisites
+  learningObjectives: [{ type: String }], // What students will learn
+  certificateOffered: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const Course = mongoose.model('Course', courseSchema, 'courses');
+
+// Course Enrollment Schema to track user progress
+const courseEnrollmentSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'Doctor', required: true },
+  courseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
+  enrolledAt: { type: Date, default: Date.now },
+  completedVideos: [{ type: String }], // Array of video IDs that user has completed
+  progress: { type: Number, default: 0 }, // Percentage of course completed (0-100)
+  completed: { type: Boolean, default: false },
+  completedAt: { type: Date },
+  certificateIssued: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const CourseEnrollment = mongoose.model('CourseEnrollment', courseEnrollmentSchema, 'courseenrollments');
 
 // Chat Schemas
 const conversationSchema = new mongoose.Schema({
@@ -1591,10 +1642,10 @@ app.get('/api/jobs', authenticateToken, async (req, res) => {
     const skip = (page - 1) * limit;
 
     // Filter parameters
-    const { search, type, specialty, location, urgent } = req.query;
+    const { search, type, specialty, location } = req.query;
 
-    // Build query
-    let query = { isActive: true };
+    // Build query - only show admin verified jobs to regular users
+    let query = { isActive: true, adminVerified: true };
 
     if (search) {
       const searchRegex = new RegExp(search, 'i');
@@ -1619,13 +1670,9 @@ app.get('/api/jobs', authenticateToken, async (req, res) => {
       query.location = { $regex: new RegExp(location, 'i') };
     }
 
-    if (urgent === 'true') {
-      query.urgent = true;
-    }
-
     const jobs = await Job.find(query)
       .populate('postedBy', 'name email specialty')
-      .sort({ urgent: -1, createdAt: -1 }) // Urgent jobs first, then newest
+      .sort({ createdAt: -1 }) // Newest first
       .skip(skip)
       .limit(limit);
 
@@ -1644,8 +1691,6 @@ app.get('/api/jobs', authenticateToken, async (req, res) => {
       experience: job.experience,
       specialty: job.specialty,
       hospital: job.hospital,
-      urgent: job.urgent,
-      isEasyApply: job.isEasyApply,
       applicants: job.applicants,
       companyLogo: job.companyLogo,
       postedDate: job.createdAt,
@@ -1929,6 +1974,530 @@ app.post('/api/jobs/:jobId/apply', authenticateToken, async (req, res) => {
     console.error('Error applying to job:', error);
     if (error.name === 'CastError') {
       return res.status(404).json({ message: 'Job not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin approve job endpoint
+app.put('/api/admin/jobs/:jobId/approve', authenticateToken, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    // TODO: Add admin role check here
+    // For now, any authenticated user can approve (you'll need to add admin role to user schema)
+
+    const job = await Job.findById(jobId);
+    if (!job) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+
+    job.adminVerified = true;
+    await job.save();
+
+    res.json({
+      message: 'Job approved successfully',
+      job: {
+        id: job._id,
+        title: job.title,
+        adminVerified: job.adminVerified
+      }
+    });
+  } catch (error) {
+    console.error('Error approving job:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin get pending jobs endpoint
+app.get('/api/admin/jobs/pending', authenticateToken, async (req, res) => {
+  try {
+    // TODO: Add admin role check here
+
+    const pendingJobs = await Job.find({
+      isActive: true,
+      adminVerified: false
+    })
+    .populate('postedBy', 'name email specialty')
+    .sort({ createdAt: -1 });
+
+    const formattedJobs = pendingJobs.map(job => ({
+      id: job._id,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      type: job.type,
+      salary: job.salary,
+      description: job.description,
+      requirements: job.requirements,
+      benefits: job.benefits,
+      experience: job.experience,
+      specialty: job.specialty,
+      hospital: job.hospital,
+      applicants: job.applicants,
+      postedBy: job.postedBy,
+      adminVerified: job.adminVerified,
+      createdAt: job.createdAt,
+      contactEmail: job.contactEmail,
+      contactPhone: job.contactPhone
+    }));
+
+    res.json({
+      jobs: formattedJobs,
+      total: formattedJobs.length
+    });
+  } catch (error) {
+    console.error('Error fetching pending jobs:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Course endpoints
+
+// Get all courses (only admin verified ones for regular users)
+app.get('/api/courses', authenticateToken, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Filter parameters
+    const { search, category, level } = req.query;
+
+    // Build query - only show admin verified courses to regular users
+    let query = { isActive: true, adminVerified: true };
+
+    if (search) {
+      const searchRegex = new RegExp(search, 'i');
+      query.$or = [
+        { title: { $regex: searchRegex } },
+        { description: { $regex: searchRegex } },
+        { instructor: { $regex: searchRegex } },
+        { category: { $regex: searchRegex } },
+        { tags: { $in: [searchRegex] } }
+      ];
+    }
+
+    if (category && category !== 'all') {
+      query.category = { $regex: new RegExp(category, 'i') };
+    }
+
+    if (level && level !== 'all') {
+      query.level = level;
+    }
+
+    const courses = await Course.find(query)
+      .populate('postedBy', 'name email specialty')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Course.countDocuments(query);
+
+    const formattedCourses = courses.map(course => ({
+      id: course._id,
+      title: course.title,
+      description: course.description,
+      thumbnail: course.thumbnail,
+      instructor: course.instructor,
+      duration: course.duration,
+      level: course.level,
+      category: course.category,
+      sectionsCount: course.sections.length,
+      enrolledCount: course.enrolledUsers.length,
+      maxEnrollments: course.maxEnrollments,
+      price: course.price,
+      tags: course.tags,
+      certificateOffered: course.certificateOffered,
+      createdAt: course.createdAt,
+      postedBy: course.postedBy ? {
+        id: course.postedBy._id,
+        name: course.postedBy.name,
+        email: course.postedBy.email,
+        specialty: course.postedBy.specialty
+      } : null
+    }));
+
+    res.json({
+      courses: formattedCourses,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit)
+    });
+  } catch (error) {
+    console.error('Error fetching courses:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get course by ID
+app.get('/api/courses/:courseId', authenticateToken, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const userId = req.user.userId;
+
+    const course = await Course.findById(courseId)
+      .populate('postedBy', 'name email specialty');
+
+    if (!course || !course.isActive || !course.adminVerified) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+
+    // Check if user is enrolled
+    const enrollment = await CourseEnrollment.findOne({
+      userId,
+      courseId
+    });
+
+    const formattedCourse = {
+      id: course._id,
+      title: course.title,
+      description: course.description,
+      thumbnail: course.thumbnail,
+      instructor: course.instructor,
+      duration: course.duration,
+      level: course.level,
+      category: course.category,
+      sections: course.sections,
+      enrolledCount: course.enrolledUsers.length,
+      maxEnrollments: course.maxEnrollments,
+      price: course.price,
+      tags: course.tags,
+      prerequisites: course.prerequisites,
+      learningObjectives: course.learningObjectives,
+      certificateOffered: course.certificateOffered,
+      createdAt: course.createdAt,
+      postedBy: course.postedBy ? {
+        id: course.postedBy._id,
+        name: course.postedBy.name,
+        email: course.postedBy.email,
+        specialty: course.postedBy.specialty
+      } : null,
+      isEnrolled: !!enrollment,
+      enrollment: enrollment ? {
+        progress: enrollment.progress,
+        completedVideos: enrollment.completedVideos,
+        completed: enrollment.completed,
+        enrolledAt: enrollment.enrolledAt
+      } : null
+    };
+
+    res.json(formattedCourse);
+  } catch (error) {
+    console.error('Error fetching course:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Create new course
+app.post('/api/courses', authenticateToken, upload.single('thumbnail'), async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      instructor,
+      duration,
+      level,
+      category,
+      sections,
+      maxEnrollments,
+      price,
+      tags,
+      prerequisites,
+      learningObjectives,
+      certificateOffered
+    } = req.body;
+
+    // Parse JSON fields if they're strings
+    const parsedSections = typeof sections === 'string' ? JSON.parse(sections) : sections;
+    const parsedTags = typeof tags === 'string' ? JSON.parse(tags) : tags;
+    const parsedPrerequisites = typeof prerequisites === 'string' ? JSON.parse(prerequisites) : prerequisites;
+    const parsedLearningObjectives = typeof learningObjectives === 'string' ? JSON.parse(learningObjectives) : learningObjectives;
+
+    let thumbnailUrl = null;
+
+    // Upload thumbnail to Cloudinary if provided
+    if (req.file) {
+      const result = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'course_thumbnails',
+            resource_type: 'image'
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        uploadStream.end(req.file.buffer);
+      });
+      thumbnailUrl = result.secure_url;
+    }
+
+    const newCourse = new Course({
+      title,
+      description,
+      thumbnail: thumbnailUrl,
+      instructor,
+      duration,
+      level: level || 'Beginner',
+      category,
+      sections: parsedSections || [],
+      maxEnrollments: maxEnrollments ? parseInt(maxEnrollments) : null,
+      price: price ? parseFloat(price) : 0,
+      tags: parsedTags || [],
+      prerequisites: parsedPrerequisites || [],
+      learningObjectives: parsedLearningObjectives || [],
+      certificateOffered: certificateOffered === 'true',
+      postedBy: req.user.userId,
+      adminVerified: false // Requires admin approval
+    });
+
+    await newCourse.save();
+
+    res.status(201).json({
+      message: 'Course created successfully! It will be visible once approved by admin.',
+      course: {
+        id: newCourse._id,
+        title: newCourse.title,
+        adminVerified: newCourse.adminVerified
+      }
+    });
+  } catch (error) {
+    console.error('Error creating course:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Enroll in course
+app.post('/api/courses/:courseId/enroll', authenticateToken, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const userId = req.user.userId;
+
+    const course = await Course.findById(courseId);
+    if (!course || !course.isActive || !course.adminVerified) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+
+    // Check if already enrolled
+    const existingEnrollment = await CourseEnrollment.findOne({
+      userId,
+      courseId
+    });
+
+    if (existingEnrollment) {
+      return res.status(400).json({ message: 'Already enrolled in this course' });
+    }
+
+    // Check enrollment limit
+    if (course.maxEnrollments && course.enrolledUsers.length >= course.maxEnrollments) {
+      return res.status(400).json({ message: 'Course enrollment is full' });
+    }
+
+    // Create enrollment
+    const enrollment = new CourseEnrollment({
+      userId,
+      courseId
+    });
+
+    await enrollment.save();
+    console.log('Created enrollment:', enrollment);
+
+    // Add user to course's enrolled users
+    course.enrolledUsers.push(userId);
+    await course.save();
+
+    res.json({
+      message: 'Successfully enrolled in course',
+      enrollment: {
+        id: enrollment._id,
+        progress: enrollment.progress,
+        enrolledAt: enrollment.enrolledAt
+      }
+    });
+  } catch (error) {
+    console.error('Error enrolling in course:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get user's enrolled courses
+app.get('/api/my-courses', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const enrollments = await CourseEnrollment.find({ userId })
+      .populate({
+        path: 'courseId',
+        populate: {
+          path: 'postedBy',
+          select: 'name email specialty'
+        }
+      })
+      .sort({ enrolledAt: -1 });
+
+    const enrolledCourses = enrollments
+      .filter(enrollment => enrollment.courseId && enrollment.courseId.isActive)
+      .map(enrollment => ({
+        id: enrollment.courseId._id,
+        title: enrollment.courseId.title,
+        description: enrollment.courseId.description,
+        thumbnail: enrollment.courseId.thumbnail,
+        instructor: enrollment.courseId.instructor,
+        level: enrollment.courseId.level,
+        category: enrollment.courseId.category,
+        progress: enrollment.progress,
+        completed: enrollment.completed,
+        enrolledAt: enrollment.enrolledAt,
+        completedAt: enrollment.completedAt,
+        certificateOffered: enrollment.courseId.certificateOffered,
+        certificateIssued: enrollment.certificateIssued
+      }));
+
+    res.json({
+      courses: enrolledCourses,
+      total: enrolledCourses.length
+    });
+  } catch (error) {
+    console.error('Error fetching enrolled courses:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin approve course endpoint
+app.put('/api/admin/courses/:courseId/approve', authenticateToken, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    // TODO: Add admin role check here
+
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+
+    course.adminVerified = true;
+    await course.save();
+
+    res.json({
+      message: 'Course approved successfully',
+      course: {
+        id: course._id,
+        title: course.title,
+        adminVerified: course.adminVerified
+      }
+    });
+  } catch (error) {
+    console.error('Error approving course:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin get pending courses endpoint
+app.get('/api/admin/courses/pending', authenticateToken, async (req, res) => {
+  try {
+    // TODO: Add admin role check here
+
+    const pendingCourses = await Course.find({
+      isActive: true,
+      adminVerified: false
+    })
+    .populate('postedBy', 'name email specialty')
+    .sort({ createdAt: -1 });
+
+    const formattedCourses = pendingCourses.map(course => ({
+      id: course._id,
+      title: course.title,
+      description: course.description,
+      thumbnail: course.thumbnail,
+      instructor: course.instructor,
+      category: course.category,
+      level: course.level,
+      sectionsCount: course.sections.length,
+      postedBy: course.postedBy,
+      adminVerified: course.adminVerified,
+      createdAt: course.createdAt
+    }));
+
+    res.json({
+      courses: formattedCourses,
+      total: formattedCourses.length
+    });
+  } catch (error) {
+    console.error('Error fetching pending courses:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Complete video endpoint
+app.post('/api/courses/:courseId/complete-video', authenticateToken, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { videoId } = req.body;
+    const userId = req.user.id;
+
+    console.log('Complete video request:', { courseId, videoId, userId });
+
+    // Find the enrollment
+    let enrollment = await CourseEnrollment.findOne({
+      courseId: courseId,
+      userId: userId
+    });
+
+    console.log('Found enrollment:', enrollment);
+
+    if (!enrollment) {
+      console.log('No enrollment found for user:', userId, 'course:', courseId);
+      return res.status(404).json({ message: 'Enrollment not found' });
+    }
+
+    // Add video to completed videos if not already completed
+    if (!enrollment.completedVideos.includes(videoId)) {
+      enrollment.completedVideos.push(videoId);
+    }
+
+    // Get the course to calculate progress
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+
+    // Calculate total videos in the course
+    const totalVideos = course.sections.reduce((total, section) => total + section.videos.length, 0);
+
+    // Update progress
+    enrollment.progress = (enrollment.completedVideos.length / totalVideos) * 100;
+
+    // Mark as completed if all videos are done
+    if (enrollment.completedVideos.length === totalVideos) {
+      enrollment.completed = true;
+    }
+
+    await enrollment.save();
+
+    res.json({
+      message: 'Video marked as completed',
+      progress: enrollment.progress,
+      completedVideos: enrollment.completedVideos,
+      completed: enrollment.completed
+    });
+  } catch (error) {
+    console.error('Error completing video:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Course not found' });
     }
     res.status(500).json({ message: 'Server error' });
   }
