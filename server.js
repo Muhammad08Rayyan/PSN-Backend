@@ -7,6 +7,7 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -27,6 +28,15 @@ cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Email transporter configuration
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  }
 });
 
 // Multer configuration for handling file uploads
@@ -141,6 +151,36 @@ const caseDiscussionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const CaseDiscussion = mongoose.model('CaseDiscussion', caseDiscussionSchema, 'casediscussions');
+
+// Jobs Schema for job postings
+const jobSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  company: { type: String, required: true },
+  location: { type: String, required: true },
+  type: {
+    type: String,
+    enum: ['Full-time', 'Part-time', 'Contract', 'Locum'],
+    default: 'Full-time'
+  },
+  salary: { type: String },
+  description: { type: String, required: true },
+  requirements: [{ type: String }],
+  benefits: [{ type: String }],
+  experience: { type: String, required: true },
+  specialty: { type: String, required: true },
+  hospital: { type: String },
+  urgent: { type: Boolean, default: false },
+  isEasyApply: { type: Boolean, default: false },
+  applicants: { type: Number, default: 0 },
+  companyLogo: { type: String },
+  postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Doctor' },
+  isActive: { type: Boolean, default: true },
+  expiryDate: { type: Date },
+  contactEmail: { type: String },
+  contactPhone: { type: String }
+}, { timestamps: true });
+
+const Job = mongoose.model('Job', jobSchema, 'jobs');
 
 // Chat Schemas
 const conversationSchema = new mongoose.Schema({
@@ -261,17 +301,31 @@ app.get('/api/auth/profile', async (req, res) => {
 // Update profile picture
 app.post('/api/auth/update-profile-pic', upload.single('profilePic'), async (req, res) => {
   try {
+    console.log('Profile picture upload request received');
+    console.log('Headers:', req.headers);
+    console.log('File:', req.file);
+    console.log('Body:', req.body);
+
     const token = req.header('Authorization')?.replace('Bearer ', '');
 
     if (!token) {
+      console.log('No token provided');
       return res.status(401).json({ message: 'No token provided' });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'psn_secret_key');
+    console.log('Token decoded successfully for user:', decoded.userId);
 
     if (!req.file) {
+      console.log('No file received in request');
       return res.status(400).json({ message: 'No image file provided' });
     }
+
+    console.log('File details:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    });
 
     // Upload to Cloudinary
     const uploadResult = await cloudinary.uploader.upload_stream(
@@ -373,17 +427,46 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       expires: Date.now() + 10 * 60 * 1000 // 10 minutes
     });
 
-    // In production, you would send this code via email
-    console.log(`Reset code for ${email}: ${resetCode}`);
+    // Send reset code via email
+    const mailOptions = {
+      from: process.env.SMTP_USER,
+      to: email,
+      subject: 'PSN Password Reset Code',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background-color: #f8f9fa; padding: 20px; text-align: center;">
+            <h2 style="color: #2c5aa0;">Pakistan Society of Neurology</h2>
+          </div>
+          <div style="padding: 30px 20px;">
+            <h3 style="color: #333;">Password Reset Request</h3>
+            <p>Dear Dr. ${doctor.name},</p>
+            <p>You have requested to reset your password. Please use the following 6-digit verification code:</p>
+            <div style="background-color: #f1f3f4; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
+              <h1 style="color: #2c5aa0; font-size: 32px; letter-spacing: 8px; margin: 0;">${resetCode}</h1>
+            </div>
+            <p><strong>This code will expire in 10 minutes.</strong></p>
+            <p>If you did not request this password reset, please ignore this email.</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+            <p style="color: #666; font-size: 14px;">
+              Best regards,<br>
+              Pakistan Society of Neurology<br>
+              <em>Powered by Helix Pharma</em>
+            </p>
+          </div>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`Reset code sent to ${email}`);
 
     res.json({
-      message: 'Reset code generated',
-      // For demo purposes, return the code (remove in production)
-      resetCode: resetCode
+      message: 'Reset code sent to your email address',
+      success: true
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Email sending error:', error);
+    res.status(500).json({ message: 'Failed to send reset code. Please try again.' });
   }
 });
 
@@ -1495,6 +1578,362 @@ app.get('/api/case-discussions/:discussionId', authenticateToken, async (req, re
   }
 });
 
+// Jobs API Endpoints
+
+// Get jobs with pagination and filtering
+app.get('/api/jobs', authenticateToken, async (req, res) => {
+  try {
+    console.log('🔥 JOBS API CALLED!!! Query params:', req.query);
+    console.log('🔥 User:', req.user);
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Filter parameters
+    const { search, type, specialty, location, urgent } = req.query;
+
+    // Build query
+    let query = { isActive: true };
+
+    if (search) {
+      const searchRegex = new RegExp(search, 'i');
+      query.$or = [
+        { title: { $regex: searchRegex } },
+        { company: { $regex: searchRegex } },
+        { location: { $regex: searchRegex } },
+        { specialty: { $regex: searchRegex } },
+        { description: { $regex: searchRegex } }
+      ];
+    }
+
+    if (type && type !== 'all') {
+      query.type = type;
+    }
+
+    if (specialty && specialty !== 'all') {
+      query.specialty = { $regex: new RegExp(specialty, 'i') };
+    }
+
+    if (location) {
+      query.location = { $regex: new RegExp(location, 'i') };
+    }
+
+    if (urgent === 'true') {
+      query.urgent = true;
+    }
+
+    const jobs = await Job.find(query)
+      .populate('postedBy', 'name email specialty')
+      .sort({ urgent: -1, createdAt: -1 }) // Urgent jobs first, then newest
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Job.countDocuments(query);
+
+    const formattedJobs = jobs.map(job => ({
+      id: job._id,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      type: job.type,
+      salary: job.salary,
+      description: job.description,
+      requirements: job.requirements,
+      benefits: job.benefits,
+      experience: job.experience,
+      specialty: job.specialty,
+      hospital: job.hospital,
+      urgent: job.urgent,
+      isEasyApply: job.isEasyApply,
+      applicants: job.applicants,
+      companyLogo: job.companyLogo,
+      postedDate: job.createdAt,
+      contactEmail: job.contactEmail,
+      contactPhone: job.contactPhone,
+      postedBy: job.postedBy ? {
+        id: job.postedBy._id,
+        name: job.postedBy.name,
+        email: job.postedBy.email,
+        specialty: job.postedBy.specialty
+      } : null,
+      timestamp: formatTimeAgo(job.createdAt)
+    }));
+
+    res.json({
+      jobs: formattedJobs,
+      posts: formattedJobs, // TEMP: Add this for testing
+      data: formattedJobs,  // TEMP: Add this for testing
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+      hasMore: page * limit < total
+    });
+  } catch (error) {
+    console.error('Error fetching jobs:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get single job by ID
+app.get('/api/jobs/:jobId', authenticateToken, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const job = await Job.findById(jobId)
+      .populate('postedBy', 'name email specialty profilePic');
+
+    if (!job || !job.isActive) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+
+    const formattedJob = {
+      id: job._id,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      type: job.type,
+      salary: job.salary,
+      description: job.description,
+      requirements: job.requirements,
+      benefits: job.benefits,
+      experience: job.experience,
+      specialty: job.specialty,
+      hospital: job.hospital,
+      urgent: job.urgent,
+      isEasyApply: job.isEasyApply,
+      applicants: job.applicants,
+      companyLogo: job.companyLogo,
+      postedDate: job.createdAt,
+      contactEmail: job.contactEmail,
+      contactPhone: job.contactPhone,
+      postedBy: job.postedBy ? {
+        id: job.postedBy._id,
+        name: job.postedBy.name,
+        email: job.postedBy.email,
+        specialty: job.postedBy.specialty,
+        profilePic: job.postedBy.profilePic
+      } : null,
+      timestamp: formatTimeAgo(job.createdAt)
+    };
+
+    res.json(formattedJob);
+  } catch (error) {
+    console.error('Error fetching job:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Create new job posting
+app.post('/api/jobs', authenticateToken, async (req, res) => {
+  try {
+    const {
+      title,
+      company,
+      location,
+      type,
+      salary,
+      description,
+      requirements,
+      benefits,
+      experience,
+      specialty,
+      hospital,
+      urgent,
+      isEasyApply,
+      contactEmail,
+      contactPhone,
+      expiryDate
+    } = req.body;
+
+    // Validate required fields
+    if (!title || !company || !location || !description || !experience || !specialty) {
+      return res.status(400).json({
+        message: 'Missing required fields: title, company, location, description, experience, specialty'
+      });
+    }
+
+    const job = new Job({
+      title,
+      company,
+      location,
+      type: type || 'Full-time',
+      salary,
+      description,
+      requirements: Array.isArray(requirements) ? requirements : [],
+      benefits: Array.isArray(benefits) ? benefits : [],
+      experience,
+      specialty,
+      hospital,
+      urgent: urgent || false,
+      isEasyApply: isEasyApply || false,
+      contactEmail,
+      contactPhone,
+      postedBy: req.user.userId,
+      expiryDate: expiryDate ? new Date(expiryDate) : null
+    });
+
+    await job.save();
+    await job.populate('postedBy', 'name email specialty');
+
+    const formattedJob = {
+      id: job._id,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      type: job.type,
+      salary: job.salary,
+      description: job.description,
+      requirements: job.requirements,
+      benefits: job.benefits,
+      experience: job.experience,
+      specialty: job.specialty,
+      hospital: job.hospital,
+      urgent: job.urgent,
+      isEasyApply: job.isEasyApply,
+      applicants: job.applicants,
+      companyLogo: job.companyLogo,
+      postedDate: job.createdAt,
+      contactEmail: job.contactEmail,
+      contactPhone: job.contactPhone,
+      postedBy: {
+        id: job.postedBy._id,
+        name: job.postedBy.name,
+        email: job.postedBy.email,
+        specialty: job.postedBy.specialty
+      },
+      timestamp: formatTimeAgo(job.createdAt)
+    };
+
+    res.status(201).json(formattedJob);
+  } catch (error) {
+    console.error('Error creating job:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Update job posting
+app.put('/api/jobs/:jobId', authenticateToken, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const updateData = req.body;
+
+    const job = await Job.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+
+    // Check if user is the owner of the job or is admin
+    if (job.postedBy.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const updatedJob = await Job.findByIdAndUpdate(
+      jobId,
+      { ...updateData, updatedAt: new Date() },
+      { new: true }
+    ).populate('postedBy', 'name email specialty');
+
+    const formattedJob = {
+      id: updatedJob._id,
+      title: updatedJob.title,
+      company: updatedJob.company,
+      location: updatedJob.location,
+      type: updatedJob.type,
+      salary: updatedJob.salary,
+      description: updatedJob.description,
+      requirements: updatedJob.requirements,
+      benefits: updatedJob.benefits,
+      experience: updatedJob.experience,
+      specialty: updatedJob.specialty,
+      hospital: updatedJob.hospital,
+      urgent: updatedJob.urgent,
+      isEasyApply: updatedJob.isEasyApply,
+      applicants: updatedJob.applicants,
+      companyLogo: updatedJob.companyLogo,
+      postedDate: updatedJob.createdAt,
+      contactEmail: updatedJob.contactEmail,
+      contactPhone: updatedJob.contactPhone,
+      postedBy: {
+        id: updatedJob.postedBy._id,
+        name: updatedJob.postedBy.name,
+        email: updatedJob.postedBy.email,
+        specialty: updatedJob.postedBy.specialty
+      },
+      timestamp: formatTimeAgo(updatedJob.createdAt)
+    };
+
+    res.json(formattedJob);
+  } catch (error) {
+    console.error('Error updating job:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Delete job posting
+app.delete('/api/jobs/:jobId', authenticateToken, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const job = await Job.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+
+    // Check if user is the owner of the job or is admin
+    if (job.postedBy.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Soft delete by setting isActive to false
+    await Job.findByIdAndUpdate(jobId, { isActive: false });
+
+    res.json({ message: 'Job deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting job:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Increment applicant count
+app.post('/api/jobs/:jobId/apply', authenticateToken, async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const job = await Job.findById(jobId);
+
+    if (!job || !job.isActive) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+
+    // Increment applicant count
+    job.applicants = (job.applicants || 0) + 1;
+    await job.save();
+
+    res.json({
+      message: 'Application submitted successfully',
+      applicants: job.applicants
+    });
+  } catch (error) {
+    console.error('Error applying to job:', error);
+    if (error.name === 'CastError') {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Test route
 app.get('/api/test', (req, res) => {
   res.json({ message: 'Test route working!' });
@@ -1528,6 +1967,12 @@ server.listen(PORT, () => {
   console.log('GET /api/events/:eventId');
   console.log('GET /api/case-discussions');
   console.log('GET /api/case-discussions/:discussionId');
+  console.log('GET /api/jobs');
+  console.log('GET /api/jobs/:jobId');
+  console.log('POST /api/jobs');
+  console.log('PUT /api/jobs/:jobId');
+  console.log('DELETE /api/jobs/:jobId');
+  console.log('POST /api/jobs/:jobId/apply');
   console.log('GET /api/test');
 });
 
